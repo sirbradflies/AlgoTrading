@@ -10,8 +10,7 @@ from QuantConnect.Algorithm import *
 
 import numpy as np
 import pandas as pd
-import keras as kr
-from sklearn.utils import shuffle
+from sklearn.neural_network import MLPRegressor
 
 
 class KerasNeuralNetworkAlgorithm(QCAlgorithm):
@@ -25,37 +24,35 @@ class KerasNeuralNetworkAlgorithm(QCAlgorithm):
         self.lookback = 10
         self.portfolio_pct = 0.5
         self.commission_pct = 1.0
-        self.model = self.build_model(input_dim=self.lookback, output_dim=1, neurons=64)
+        self.model = MLPRegressor(
+            hidden_layer_sizes=(64,), warm_start=False, early_stopping=True
+        )
         self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
         self.AddEquity("SPY", Resolution.Minute)  # TODO: Remove?
-
         self.Schedule.On(self.DateRules.EveryDay(),
                          self.TimeRules.AfterMarketOpen("SPY", 1),
                          self.train_model)
+        self.X, self.Y = [], []
 
     def train_model(self):
-        # TODO: Add more features
-        x_train, y_train = [], []  # TODO: Use pandas and shuffle pre-training
-        for symbol in self.Securities.Keys:
+        for symbol in self.Securities.Keys: # TODO: Add more features
             if self.has_features(symbol, ago=1, size=self.lookback):
-                x_train += [self.get_features(symbol, ago=1, size=self.lookback)]
-                y_train += self.get_features(symbol, ago=0, size=1)
+                self.X += [self.get_features(symbol, ago=1, size=self.lookback)]
+                self.Y += self.get_features(symbol, ago=0, size=1)
 
-        x_train, y_train = shuffle(np.array(x_train), np.array(y_train))
-        callbacks = [kr.callbacks.EarlyStopping(monitor='val_loss', min_delta=0, patience=3)]
-        train_log = self.model.fit(  # TODO: Ensure warm start for the model
-            x_train, y_train, validation_split=0.2, epochs=100, callbacks=callbacks
-        )
-        self.Debug(f'Training Epochs: {len(train_log.history["val_loss"])}')
-        self.Debug(f'Val loss: {train_log.history["val_loss"][-1]:.5f}')
+        self.model.fit(np.array(self.X), np.array(self.Y))
+        self.Debug(f'Datapoints: {self.X.shape[0]}')
+        self.Debug(f'Training Epochs: {self.model.n_iter_}')
+        self.Debug(f'Score: {self.model.validation_scores_[-1]:.5f}')
+        self.Plot('Model Score', 'Score', self.model.validation_scores_[-1])
         # TODO: Save model after training
 
         pred_returns = {}
         for symbol in self.Securities.Keys:
             if self.has_features(symbol, ago=0, size=self.lookback):
                 x_pred = np.array([self.get_features(symbol, ago=0, size=self.lookback)])
-                pred_returns[symbol] = self.model.predict(x_pred)[0][0]
+                pred_returns[symbol] = self.model.predict(x_pred)
 
         self.trade(pred_returns)
 
@@ -100,16 +97,6 @@ class KerasNeuralNetworkAlgorithm(QCAlgorithm):
                 self.SetHoldings(symbol, -self.portfolio_pct / self.short_stocks)
             else:
                 self.Liquidate(symbol)
-
-    def build_model(self, input_dim, output_dim, depth=1, neurons=128, activation='relu'):
-        """ Build a sequential Keras model according to parameters """
-        model = kr.models.Sequential()
-        model.add(kr.layers.Dense(neurons, input_dim=input_dim, activation=activation))
-        for layer in range(1, depth):
-            model.add(kr.layers.Dense(neurons, activation=activation))
-        model.add(kr.layers.Dense(output_dim))
-        model.compile(loss='mse', optimizer='adam')
-        return model
 
     def OnSecuritiesChanged(self, changes):
         self._changes = changes
