@@ -1,5 +1,10 @@
-import clr
+# PROTOCOL: BT 1yr, BT 10yr, PT 1mth, LT 1mth/1k, LT1m/2k
+#TODO: Test long/short only
+#TODO: Test minute resolution
+#TODO: Test crypto
 
+
+import clr
 clr.AddReference("System")
 clr.AddReference("QuantConnect.Algorithm")
 clr.AddReference("QuantConnect.Common")
@@ -11,68 +16,65 @@ from QuantConnect.Algorithm import *
 import numpy as np
 import pandas as pd
 from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import train_test_split as split
+from sklearn.model_selection import train_test_split
 
 
 class NeuralNetworkAlgorithm(QCAlgorithm):
 
     def Initialize(self):
-        self.SetStartDate(2011, 6, 1)
-        self.SetEndDate(2011, 12, 31)
-        self.stocks = 10
-        self.lookback = 20  # TODO: Check warmup for golive
-        self.leverage = 0.5
+        self.SetStartDate(2018, 7, 1)
+        self.SetEndDate(2019, 6, 30)
+        self.lookback = 21
+        self.stocks = 20
+        self.long_short_ratio = 1.0  # 1.0 Long only - 0.0 Short only
+        self.long_stocks = int(self.stocks * self.long_short_ratio)
+        self.short_stocks = self.stocks-self.long_stocks
         self.model = MLPRegressor(hidden_layer_sizes=(128,),
-                                  warm_start=True,
-                                  validation_fraction=0.2)
+                                  warm_start=True)
         self.AddUniverse(self.Universe.Index.QC500)
         self.AddEquity("SPY", Resolution.Minute)
-        self.Schedule.On(self.DateRules.EveryDay("SPY"),  # TODO: Check alternative schedule
+        self.Schedule.On(self.DateRules.EveryDay("SPY"),
                          self.TimeRules.AfterMarketOpen("SPY", 30),
                          self.train_model)
-        self.X_train, self.Y_train, self.X_test, self.Y_test = [], [], [], []
+        self.X, self.Y = None, None
 
     def train_model(self):
-        securities = list(self.ActiveSecurities.Keys)
-        if len(securities) >= 2 * self.stocks:
-            train_stocks, test_stocks = split(securities, test_size=0.2)
-            self.X_train, self.Y_train = self.add_datapoints(self.X_train, self.Y_train,
-                                                             train_stocks)
-            self.X_test, self.Y_test = self.add_datapoints(self.X_test, self.Y_test,
-                                                           test_stocks)
-            self.model.fit(np.array(self.X_train), np.array(self.Y_train))
-            self.Debug(f'Datapoints: {len(self.X_train)}\t'
+        symbols = list(self.ActiveSecurities.Keys)
+        if len(symbols) >= self.long_stocks+self.short_stocks:
+            self.X = self.add_datapoints(self.X, symbols, ago=1, size=self.lookback)
+            self.Y = self.add_datapoints(self.Y, symbols, ago=0, size=1)
+            X_train, X_test, Y_train, Y_test = train_test_split(self.X, self.Y)
+            self.model.fit(X_train, Y_train)
+            score = self.model.score(X_test, Y_test)
+            self.Debug(f'Datapoints: {len(self.X)}\t'
                        f'Epochs: {self.model.n_iter_}\t'
-                       f'Val. Score: {self.model.score(self.X_test, self.Y_test):.4f}')
+                       f'Val. Score: {score:.4f}')
             #self.ObjectStore.SaveBytes("model", bytearray(self.model))  # TODO: Save model after training
             #self.model = self.ObjectStore.ReadBytes("model")
 
-            pred_returns = {}
-            for symbol in self.ActiveSecurities.Keys:
-                X_pred = np.array([self.get_features(symbol, ago=0, size=self.lookback)])
-                pred_returns[symbol] = self.model.predict(X_pred)
+            Y_pred = self.get_features(symbols, ago=0, size=self.lookback)
+            returns_pred = pd.DataFrame(self.model.predict(Y_pred), index=symbols)
+            if score > 0:
+                self.trade(returns_pred)
 
-            self.trade(pred_returns)
-
-    def add_datapoints(self, X, Y, stocks, max_datapoints=5000):
+    def add_datapoints(self, data, symbols, ago, size, max_points=10000):
         """ Update train/test datapoints capping array length """
-        for symbol in stocks:
-            X += [self.get_features(symbol, ago=1, size=self.lookback)]
-            Y += self.get_features(symbol, ago=0, size=1)
-        X = X[-max_datapoints:] if len(X) > max_datapoints else X
-        Y = Y[-max_datapoints:] if len(Y) > max_datapoints else Y
-        return X, Y
+        new_data = self.get_features(symbols, ago=ago, size=size)
+        data = new_data if data is None else np.vstack((data, new_data))
+        return data[-max_points:] if len(data) > max_points else data
 
-    def get_features(self, symbol, ago=0, size=1):   # TODO: Add more features
+    def get_features(self, symbols, ago=0, size=1):   # TODO: Add more features
         """ Extract features for model training and prediction """
-        close = self.History(symbol, size + ago + 1, Resolution.Daily)['open']
-        returns = list((close / close.shift(1) - 1).dropna().head(size))
-        return ([0]*size+returns)[-size:]  # 0 padding for missing values
+        history = self.History(symbols, size + ago + 1, Resolution.Daily)
+        symbols_order = history.index.get_level_values(0).unique()
+        close = history['close'].unstack(-1).loc[symbols_order]
+        returns = (close / close.shift(1, axis=1) - 1).fillna(0)
+        return returns.values[:, 1:1+size]  # placing symbols as index and time as columns
 
     def trade(self, pred_returns):
         """  Rank returns and select the top for long and bottom for short """
-        long_stocks = self.rank_stocks(pred_returns, long=True).head(self.stocks).index
-        short_stocks = self.rank_stocks(pred_returns, long=False).head(self.stocks).index
+        long_stocks = self.rank_stocks(pred_returns, long=True).head(self.long_stocks).index
+        short_stocks = self.rank_stocks(pred_returns, long=False).head(self.short_stocks).index
         invested_stocks = [s for s in self.Securities.Keys if self.Portfolio[s].Invested]
         liquidate_stocks = set(invested_stocks) - set(long_stocks) - set(short_stocks)
         self.Log(f'Buy stocks: {long_stocks}\nSell stocks: {short_stocks}')
@@ -81,25 +83,25 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         for symbol in liquidate_stocks:
             self.Liquidate(symbol)
         for symbol in long_stocks:
-            self.SetHoldings(symbol, self.leverage / self.stocks)
+            self.SetHoldings(symbol, self.long_short_ratio / self.long_stocks)
         for symbol in short_stocks:
-            self.SetHoldings(symbol, -self.leverage / self.stocks)
+            self.SetHoldings(symbol, -(1 - self.long_short_ratio) / self.short_stocks)
 
-    def rank_stocks(self, pred_returns, long=True, safety_margin=0.05):
+    def rank_stocks(self, pred_returns, long=True, commissions_pct=0.01, contingency=2):
         """
-        Calculate best stocks to long or short accounting
-        for commissions and current portfolio positions
+        Calculate best stocks to long or short from predicted returns
+        and accounting for commissions and current portfolio positions
         """
-        sign = -1 if long else +1
+        friction = (-1 if long else +1) * commissions_pct * contingency
         ranking = {}
-        for symbol, returns in pred_returns.items():
+        for symbol, row in pred_returns.iterrows():
+            pred_return = row[0]
             position = self.Portfolio[symbol]
             if (long and position.IsLong) or (not long and position.IsShort):  # Symbol already in the position desired
-                ranking[symbol] = returns  # No commissions
+                ranking[symbol] = pred_return  # No commissions
             elif (not long and position.IsLong) or (long and position.IsShort):  # Symbol in the opposite position
-                ranking[symbol] = returns + sign * 2 * safety_margin  # Twice the commissions
+                ranking[symbol] = pred_return + 2 * friction  # Twice the commissions
             else:  # Symbol not in the portfolio
-                ranking[symbol] = returns + sign * safety_margin
-        return pd.DataFrame.from_dict(
-            ranking, orient='index', columns=['return']
-        ).sort_values('return', ascending=not long)
+                ranking[symbol] = pred_return + friction  # One commission cost applied
+        ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
+        return ranking.sort_values('return', ascending=not long)
