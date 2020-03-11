@@ -1,5 +1,4 @@
 # PROTOCOL: BT 1yr, BT 10yr, PT 1mth, LT 1mth/1k, LT1m/2k
-#TODO: Test long/short only
 #TODO: Test minute resolution
 #TODO: Test crypto
 
@@ -24,22 +23,21 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
     def Initialize(self):
         self.SetStartDate(2018, 7, 1)
         self.SetEndDate(2019, 6, 30)
-        self.lookback = 21
+        self.lookback = 252
         self.stocks = 20
-        self.long_short_ratio = 1.0  # 1.0 Long only - 0.0 Short only
+        self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_stocks = int(self.stocks * self.long_short_ratio)
         self.short_stocks = self.stocks-self.long_stocks
-        self.model = MLPRegressor(hidden_layer_sizes=(128,),
-                                  warm_start=True)
+        self.model = MLPRegressor(hidden_layer_sizes=(128,))
         self.AddUniverse(self.Universe.Index.QC500)
-        self.AddEquity("SPY", Resolution.Minute)
-        self.Schedule.On(self.DateRules.EveryDay("SPY"),
-                         self.TimeRules.AfterMarketOpen("SPY", 30),
+        self.Schedule.On(self.DateRules.EveryDay(),
+                         self.TimeRules.At(10, 0, 0),
                          self.train_model)
         self.X, self.Y = None, None
 
     def train_model(self):
-        symbols = list(self.ActiveSecurities.Keys)
+        symbols = [s for s in list(self.ActiveSecurities.Keys)
+                   if self.IsMarketOpen(s)]
         if len(symbols) >= self.long_stocks+self.short_stocks:
             self.X = self.add_datapoints(self.X, symbols, ago=1, size=self.lookback)
             self.Y = self.add_datapoints(self.Y, symbols, ago=0, size=1)
