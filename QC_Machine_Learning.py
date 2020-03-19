@@ -1,3 +1,11 @@
+"""
+Basic Machine Learning bot for Quantconnect
+
+@author: Francesco Baldisserri
+@email: fbaldisserri@gmail.com
+@version: 0.1
+"""
+
 import clr
 clr.AddReference("System")
 clr.AddReference("QuantConnect.Algorithm")
@@ -20,10 +28,10 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.lookback = 252
         self.portfolio_stocks = 20
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
-        self.long_stocks = int(self.portfolio_stocks * self.long_short_ratio)
-        self.short_stocks = self.portfolio_stocks - self.long_stocks
+        self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
+        self.short_pos = self.portfolio_stocks - self.long_pos
         self.model = MLPRegressor(hidden_layer_sizes=(32, 32), max_iter=1000,
-                                  early_stopping=True, tol=0)
+                                  early_stopping=True, tol=0, warm_start=True)
         self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
         self.UniverseSettings.Resolution = self.resolution
@@ -38,12 +46,12 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         if len(active_stocks) >= self.portfolio_stocks:
             train_stocks, val_stocks = train_test_split(active_stocks)
             self.X, self.Y = self.add_data(self.X, self.Y, train_stocks)
-            self.X_val, self.Y_val = self.add_data(self.X_val, self.Y_val, val_stocks)
             self.model.fit(self.X, self.Y)
+            self.X_val, self.Y_val = self.add_data(self.X_val, self.Y_val, val_stocks)
             self.score = self.model.score(self.X_val, self.Y_val)
-            self.Debug(f'Time: {self.Time}\tDatapoints: {len(self.X)}\t'
+            self.Debug(f'Time: {self.Time}\tPoints: {len(self.X)}\t'
                        f'Epochs: {self.model.n_iter_}\tScore: {self.score:.4f}')
-            if self.score > 0:
+            if self.score > 0:  # If model better than random then trade
                 features, _ = self.get_data(symbols=active_stocks,
                                             features=self.lookback,
                                             targets=0)
@@ -58,30 +66,29 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                                      targets=1)
         X = X_new if X_old is None else np.vstack((X_old, X_new))
         Y = Y_new if Y_old is None else np.vstack((Y_old, Y_new))
-        return (X[-max_len:],Y[-max_len:]) if len(X) > max_len else (X,Y)
+        return (X[-max_len:], Y[-max_len:]) if len(X) > max_len else (X, Y)
 
     def get_data(self, symbols, features, targets):   # TODO: Add fundamentals
         """ Extract datapoints for model training and prediction """
         history = self.History(symbols, targets + features + 1, self.resolution)
         close = history['close'].unstack(-1)
-        returns = (close / close.shift(1, axis=1) - 1).iloc[:, 1:]
-        data = returns.dropna()
-        return data.iloc[:, :features], data.iloc[:, features:]  # Return X, Y
+        returns = (close / close.shift(1, axis=1) - 1).iloc[:, 1:].fillna(0)
+        return returns.iloc[:, :features], returns.iloc[:, features:]  # Return X, Y
 
     def trade(self, returns):
         """ Rank returns and select the top for long and bottom for short """
-        to_long = self.rank_stocks(returns, long=True).head(self.long_stocks).index
-        to_short = self.rank_stocks(returns, long=False).head(self.short_stocks).index
+        to_long = self.rank_stocks(returns, long=True).head(self.long_pos).index
+        to_short = self.rank_stocks(returns, long=False).head(self.short_pos).index
         invested = [s for s in self.Securities.Keys if self.Portfolio[s].Invested]
         to_sell = set(invested) - set(to_long) - set(to_short)
-        self.Log(f'Buy stocks: {to_long}\nSell stocks: {to_short}')
-        self.Log(f'Portfolio changes: {len(to_sell)}/{len(invested)}')
         for symbol in to_sell:
             self.Liquidate(symbol)
         for symbol in to_long:
-            self.SetHoldings(symbol, self.long_short_ratio / self.long_stocks)
+            self.SetHoldings(symbol, self.long_short_ratio / self.long_pos)
         for symbol in to_short:
-            self.SetHoldings(symbol, -(1 - self.long_short_ratio) / self.short_stocks)
+            self.SetHoldings(symbol, -(1 - self.long_short_ratio) / self.short_pos)
+        self.Log(f'Buy stocks: {to_long}\nSell stocks: {to_short}')
+        self.Log(f'Portfolio changes: {len(to_sell)}/{len(invested)}')
 
     def rank_stocks(self, pred_returns, long=True, commissions_pct=0.01):
         """
