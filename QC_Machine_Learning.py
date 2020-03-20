@@ -79,7 +79,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         """ Rank returns and select the top for long and bottom for short """
         to_long = self.rank_stocks(returns, long=True).head(self.long_pos).index
         to_short = self.rank_stocks(returns, long=False).head(self.short_pos).index
-        invested = [s for s in self.Securities.Keys if self.Portfolio[s].Invested]
+        invested = [str(s.ID) for s in self.Securities.Keys if self.Portfolio[s].Invested]
         to_sell = set(invested) - set(to_long) - set(to_short)
         for symbol in to_sell:
             self.Liquidate(symbol)
@@ -95,17 +95,16 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         Calculate best stocks to long or short from predicted returns
         and accounting for commissions and current portfolio positions
         """
-        contingency = 1.0/self.score  # TODO: Transform contingency into returns normalization
-        friction = (-1 if long else +1) * commissions_pct * contingency
+        friction = (-1 if long else +1) * commissions_pct
         ranking = {}
         for symbol, row in pred_returns.iterrows():
-            pred_return = row[0]
+            exp_return = row[0] * max(0, self.score)  # Normalizing return by model score when positive
             position = self.Portfolio[symbol]
             if (long and position.IsLong) or (not long and position.IsShort):  # Symbol already in the position desired
-                ranking[symbol] = pred_return  # No commissions
+                ranking[symbol] = exp_return  # No commissions
             elif (not long and position.IsLong) or (long and position.IsShort):  # Symbol in the opposite position
-                ranking[symbol] = pred_return + 2 * friction  # Twice the commissions
+                ranking[symbol] = exp_return + 2 * friction  # Twice the commissions
             else:  # Symbol not in the portfolio
-                ranking[symbol] = pred_return + friction  # One commission cost applied
+                ranking[symbol] = exp_return + friction  # One commission cost applied
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
