@@ -3,7 +3,7 @@ Basic Machine Learning bot for Quantconnect
 
 @author: Francesco Baldisserri
 @email: fbaldisserri@gmail.com
-@version: 0.1
+@version: 0.2
 """
 
 import clr
@@ -30,8 +30,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
         self.short_pos = self.portfolio_stocks - self.long_pos
-        self.model = MLPRegressor(hidden_layer_sizes=(32, 32), max_iter=1000,
-                                  early_stopping=True, tol=0, warm_start=True)
+        self.model = MLPRegressor(hidden_layer_sizes=(128,64), max_iter=1000,
+                                  early_stopping=True, tol=0, warm_start)
         self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
         self.UniverseSettings.Resolution = self.resolution
@@ -59,7 +59,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                                                  index=features.index)
                 self.trade(returns_predicted)
 
-    def add_data(self, X_old, Y_old, symbols, max_len=10000):
+    def add_data(self, X_old, Y_old, symbols, max_len=50000):
         """ Accumulate datapoints for model training and test """
         X_new, Y_new = self.get_data(symbols=symbols,
                                      features=self.lookback,
@@ -68,7 +68,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         Y = Y_new if Y_old is None else np.vstack((Y_old, Y_new))
         return (X[-max_len:], Y[-max_len:]) if len(X) > max_len else (X, Y)
 
-    def get_data(self, symbols, features, targets):   # TODO: Add fundamentals
+    def get_data(self, symbols, features, targets):
         """ Extract datapoints for model training and prediction """
         history = self.History(symbols, targets + features + 1, self.resolution)
         close = history['close'].unstack(-1)
