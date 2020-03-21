@@ -30,15 +30,31 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
         self.short_pos = self.portfolio_stocks - self.long_pos
-        self.model = MLPRegressor(hidden_layer_sizes=(32, 32), max_iter=1000,
+        self.model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=1000,
                                   early_stopping=True, tol=0, warm_start=True)
         self.resolution = Resolution.Daily
-        self.AddUniverse(self.Universe.Index.QC500)
+        self.AddUniverse(self.top_fundamentals, self.store_fundamentals)
         self.UniverseSettings.Resolution = self.resolution
         self.Schedule.On(self.DateRules.EveryDay(),
                          self.TimeRules.At(10, 0, 0),
-                         self.train_model)
-        self.X, self.Y, self.X_val, self.Y_val = None, None, None, None
+                         self.trading_strategy)
+        self.fundamentals = None
+
+    def trading_strategy(self):
+        """ Prepare the data, train the ML model and trade """
+        X, Y = self.prepare_data(self.fundamentals)
+        #train_model
+        #trade
+
+    def prepare_data(self, fundamentals):
+        features = [f for f in fundamentals.columns if f not in ['symbol', 'time']]
+        data = fundamentals.pivot(columns='symbol', values=features)
+        data['target'] = data['mom'].shift(1)
+        data = data.dropna()
+        targets = data.pop('target')
+        features = data
+        return features, targets
+
 
     def train_model(self):
         active_stocks = [s for s in list(self.ActiveSecurities.Keys)
@@ -59,7 +75,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                                                  index=features.index)
                 self.trade(returns_predicted)
 
-    def add_data(self, X_old, Y_old, symbols, max_len=10000):
+    def add_data(self, X_old, Y_old, symbols, max_len=50000):
         """ Accumulate datapoints for model training and test """
         X_new, Y_new = self.get_data(symbols=symbols,
                                      features=self.lookback,
@@ -95,17 +111,41 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         Calculate best stocks to long or short from predicted returns
         and accounting for commissions and current portfolio positions
         """
-        contingency = 1.0/self.score  # TODO: Transform contingency into returns normalization
-        friction = (-1 if long else +1) * commissions_pct * contingency
+        friction = (-1 if long else +1) * commissions_pct
         ranking = {}
         for symbol, row in pred_returns.iterrows():
-            pred_return = row[0]
+            exp_return = row[0] * self.score  # Normalizing returns according to model score
             position = self.Portfolio[symbol]
             if (long and position.IsLong) or (not long and position.IsShort):  # Symbol already in the position desired
-                ranking[symbol] = pred_return  # No commissions
+                ranking[symbol] = exp_return  # No commissions
             elif (not long and position.IsLong) or (long and position.IsShort):  # Symbol in the opposite position
-                ranking[symbol] = pred_return + 2 * friction  # Twice the commissions
+                ranking[symbol] = exp_return + 2 * friction  # Twice the commissions
             else:  # Symbol not in the portfolio
-                ranking[symbol] = pred_return + friction  # One commission cost applied
+                ranking[symbol] = exp_return + friction  # One commission cost applied
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
+
+    def top_fundamentals(self, coarse):
+        """ Return top 1000 stocks by volume with fundamentals """
+        ranked_stocks = sorted([x for x in coarse if x.HasFundamentalData],
+                               key=lambda x: x.DollarVolume, reverse=True)
+        return [x.Symbol for x in ranked_stocks[:1000]]
+
+    def store_fundamentals(self, fine):
+        """ Save fundamental features in a dataframe """
+        data = []
+        for x in fine:
+            data += [{'symbol': x.Symbol,
+                      'time': self.Time,
+                      'mom': x.ValuationRatios.PriceChange1M,
+                      'target': x.ValuationRatios.PriceChange1M,
+                      'pe': x.ValuationRatios.PERatio,
+                      'pb': x.ValuationRatios.PBRatio,
+                      'pcf': x.ValuationRatios.PCFRatio,
+                      'ni': x.OperationRatios.NetMargin.OneYear,
+                      'roa': x.OperationRatios.ROA.OneYear,
+                      'ae': x.OperationRatios.FinancialLeverage.OneYear}]  # TODO: Correct assets/equity?
+        df = pd.DataFrame(data)
+        self.fundamentals = df if self.fundamentals is None \
+            else pd.concat((self.fundamentals, df), axis='columns')
+        return [x.Symbol for x in fine]
