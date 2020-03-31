@@ -38,7 +38,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.short_pos = self.holdings - self.long_pos
         self.feat_encoder, self.targ_encoder = None, None
         self.model = MLPRegressor(hidden_layer_sizes=(32,),
-                                  early_stopping=True,
+                                  early_stopping=True, tol=0,
                                   warm_start=True)
         self.history = pd.DataFrame()
         self.history_maxlen = 10000
@@ -65,7 +65,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                     features, _ = self.get_data(training=False,
                                                 symbols=active_stocks)
                     pred_returns = self.predict_returns(features)
-                    self.trade(pred_returns, score)
+                    self.trade(pred_returns)
 
     def get_data(self, training=True, symbols=None):  # TODO: Test with lookback periods
         """ Return features and target both for training and prediction """
@@ -95,11 +95,11 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         return pd.DataFrame(self.targ_encoder.inverse_transform(Y),
                             index=features.index.get_level_values('symbol'))
 
-    def trade(self, returns, score):
+    def trade(self, returns):
         """ Rank returns and select the top for long and bottom for short """
-        long_ranking = self.rank_stocks(returns, long=True, confidence=score)
+        long_ranking = self.rank_stocks(returns, long=True)
         to_long = long_ranking.head(self.long_pos).index
-        short_ranking = self.rank_stocks(returns, long=False, confidence=score)
+        short_ranking = self.rank_stocks(returns, long=False)
         to_short = short_ranking.head(self.short_pos).index
         invested = [s for s in self.Securities.Keys if self.Portfolio[s].Invested]
         to_sell = set(invested) - set(to_long) - set(to_short)
@@ -114,22 +114,11 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.Log(f'Longs: {to_long}\nShorts: {to_short}')
         self.Log(f'Changes: {len(to_sell)}/{len(invested)}')
 
-    def rank_stocks(self, pred_returns, long=True, commission=0.01, confidence=1):
+    def rank_stocks(self, pred_returns, long=True):
         """
         Calculate best stocks to long or short from predicted returns
-        and accounting for commissions and current portfolio positions
         """
-        friction = (-1 if long else +1) * commission
-        ranking = {}
-        for symbol, row in pred_returns.iterrows():
-            exp_return = row[0] * max(confidence, 0)  # Normalizing returns according to model score
-            position = self.Portfolio[symbol]
-            if (long and position.IsLong) or (not long and position.IsShort):  # Symbol already in the position desired
-                ranking[symbol] = exp_return  # No commissions
-            elif (not long and position.IsLong) or (long and position.IsShort):  # Symbol in the opposite position
-                ranking[symbol] = exp_return + 2 * friction  # Twice the commissions
-            else:  # Symbol not in the portfolio
-                ranking[symbol] = exp_return + friction  # One commission cost applied
+        ranking = {symbol: row[0] for symbol, row in pred_returns.iterrows()}
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
 
@@ -141,7 +130,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
             self.last_update = self.Time
             ranked_stocks = sorted([x for x in coarse if x.HasFundamentalData],
                                    key=lambda x: x.DollarVolume, reverse=True)
-            return [x.Symbol for x in ranked_stocks[:100]]
+            return [x.Symbol for x in ranked_stocks[:1000]]
 
     def store_fundamentals(self, fine):
         """ Save fundamental features in a dataframe """
