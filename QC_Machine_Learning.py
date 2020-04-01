@@ -3,7 +3,7 @@ Machine Learning Value bot for Quantconnect
 
 @author: Francesco Baldisserri
 @email: fbaldisserri@gmail.com
-@version: 0.3
+@version: 0.5
 """
 
 import clr
@@ -36,10 +36,9 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_pos = int(self.holdings * self.long_short_ratio)
         self.short_pos = self.holdings - self.long_pos
-        self.feat_encoder, self.targ_encoder = None, None
-        self.model = MLPRegressor(hidden_layer_sizes=(32,),
-                                  early_stopping=True, tol=0,
-                                  warm_start=True)
+        self.feat_encoder, self.targ_encoder = MinMaxScaler(), MinMaxScaler()
+        self.model = MLPRegressor(hidden_layer_sizes=(32, 16),
+                                  early_stopping=True)
         self.history = pd.DataFrame()
         self.history_maxlen = 10000
         self.last_update = self.last_execution = datetime(1, 1, 1)
@@ -79,11 +78,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
 
     def train_model(self, features, target):
         """ Train model with passed data and return validation score """
-        if self.feat_encoder is None or self.targ_encoder is None:
-            self.feat_encoder = MinMaxScaler().fit(features)
-            self.targ_encoder = MinMaxScaler().fit(target.values.reshape(-1, 1))
-        X = self.feat_encoder.transform(features)
-        Y = self.targ_encoder.transform(target.values.reshape(-1, 1))
+        X = self.feat_encoder.fit_transform(features)
+        Y = self.targ_encoder.fit_transform(target.values.reshape(-1, 1))
         X_train, X_val, Y_train, Y_val = train_test_split(X, Y)
         self.model.fit(X_train, Y_train)
         return self.model.score(X_val, Y_val)
@@ -115,9 +111,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.Log(f'Changes: {len(to_sell)}/{len(invested)}')
 
     def rank_stocks(self, pred_returns, long=True):
-        """
-        Calculate best stocks to long or short from predicted returns
-        """
+        """ Calculate best stocks to long or short from predicted returns """
         ranking = {symbol: row[0] for symbol, row in pred_returns.iterrows()}
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
@@ -133,20 +127,20 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
             return [x.Symbol for x in ranked_stocks[:1000]]
 
     def store_fundamentals(self, fine):
-        """ Save fundamental features in a dataframe """
+        """ Save fundamental features in a history dataframe """
         rows = []
         for x in fine:
             rows += [{'time': self.Time,
                       'symbol': x.Symbol,
                       'pe': x.ValuationRatios.PERatio,
-                      'pb': x.ValuationRatios.PBRatio,
-                      'pcf': x.ValuationRatios.PCFRatio,
-                      'ni': x.OperationRatios.NetMargin.OneYear,
+                      #'pb': x.ValuationRatios.PBRatio,
+                      #'pcf': x.ValuationRatios.PCFRatio,
+                      #'ni': x.OperationRatios.NetMargin.OneYear,
                       'roa': x.OperationRatios.ROA.OneYear,
-                      'ae': x.OperationRatios.FinancialLeverage.OneYear,
+                      #'ae': x.OperationRatios.FinancialLeverage.OneYear,
                       'return': x.ValuationRatios.PriceChange1M}]
         data = pd.DataFrame(rows).drop_duplicates(['time', 'symbol'])
         self.history = self.history.append(data.set_index(['time', 'symbol']))
         if len(self.history) > self.history_maxlen:
-            self.history = self.history.sample(self.history_maxlen)
+            self.history = self.history.tail(self.history_maxlen)
         return [x.Symbol for x in fine]
