@@ -20,14 +20,8 @@ import pandas as pd
 from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import train_test_split
 
 
-# TODO: Test Optimization levers
-# Features (ratios...)
-# Model (depth, neurons)
-# Encoders
-# Datapoints (Stocks, Lookback)
 class NeuralNetworkAlgorithm(QCAlgorithm):
     def Initialize(self):
         self.SetStartDate(2008, 1, 1)
@@ -37,10 +31,9 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.long_pos = int(self.holdings * self.long_short_ratio)
         self.short_pos = self.holdings - self.long_pos
         self.feat_encoder, self.targ_encoder = MinMaxScaler(), MinMaxScaler()
-        self.model = MLPRegressor(hidden_layer_sizes=(32, 16),
-                                  early_stopping=True)
+        self.model = MLPRegressor(hidden_layer_sizes=(32,), early_stopping=True)
         self.history = pd.DataFrame()
-        self.history_maxlen = 10000
+        self.maxpoints = 10000
         self.last_update = self.last_execution = datetime(1, 1, 1)
         self.AddUniverse(self.top_fundamentals, self.store_fundamentals)
         self.Schedule.On(self.DateRules.EveryDay(),
@@ -66,30 +59,31 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                     pred_returns = self.predict_returns(features)
                     self.trade(pred_returns)
 
-    def get_data(self, training=True, symbols=None):  # TODO: Test with lookback periods
+    def get_data(self, training=True, symbols=None):
         """ Return features and target both for training and prediction """
         data = self.history.dropna()
         if symbols is not None:
             data = data[data.index.get_level_values('symbol').isin(symbols)]
-        target = data['return'].unstack('symbol').shift(-1).stack('symbol', dropna=False)
-        target = target.dropna() if training else target.loc[target.isnull()]
-        mask = target.index.intersection(data.index)  # TODO: Refactor
-        return data.loc[mask, :], target.loc[mask]
+        target = data[['return']].unstack().shift(-1).stack(dropna=False)
+        target = target.dropna() if training else target.loc[target.isnull().any(1)]
+        mask = target.index.intersection(data.index)
+        if len(mask) > self.maxpoints:
+            mask = mask[-self.maxpoints:]
+        return data.loc[mask, :], target.loc[mask, :]
 
     def train_model(self, features, target):
         """ Train model with passed data and return validation score """
         X = self.feat_encoder.fit_transform(features)
-        Y = self.targ_encoder.fit_transform(target.values.reshape(-1, 1))
-        X_train, X_val, Y_train, Y_val = train_test_split(X, Y)
-        self.model.fit(X_train, Y_train)
-        return self.model.score(X_val, Y_val)
+        Y = self.targ_encoder.fit_transform(target)
+        return self.model.fit(X, Y).best_validation_score_
 
     def predict_returns(self, features):
         """ Return expected returns by symbol """
-        X = self.targ_encoder.transform(features)
+        X = self.feat_encoder.transform(features)
         Y = self.model.predict(X).reshape(-1, 1)
         return pd.DataFrame(self.targ_encoder.inverse_transform(Y),
-                            index=features.index.get_level_values('symbol'))
+                            index=features.index.get_level_values('symbol'),
+                            columns=['return'])
 
     def trade(self, returns):
         """ Rank returns and select the top for long and bottom for short """
@@ -112,7 +106,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
 
     def rank_stocks(self, pred_returns, long=True):
         """ Calculate best stocks to long or short from predicted returns """
-        ranking = {symbol: row[0] for symbol, row in pred_returns.iterrows()}
+        ranking = {symbol: ret for symbol, ret in pred_returns.iteritems()}
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
 
@@ -124,7 +118,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
             self.last_update = self.Time
             ranked_stocks = sorted([x for x in coarse if x.HasFundamentalData],
                                    key=lambda x: x.DollarVolume, reverse=True)
-            return [x.Symbol for x in ranked_stocks[:1000]]
+            return [x.Symbol for x in ranked_stocks[:100]]
 
     def store_fundamentals(self, fine):
         """ Save fundamental features in a history dataframe """
@@ -133,14 +127,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
             rows += [{'time': self.Time,
                       'symbol': x.Symbol,
                       'pe': x.ValuationRatios.PERatio,
-                      #'pb': x.ValuationRatios.PBRatio,
-                      #'pcf': x.ValuationRatios.PCFRatio,
-                      #'ni': x.OperationRatios.NetMargin.OneYear,
-                      'roa': x.OperationRatios.ROA.OneYear,
-                      #'ae': x.OperationRatios.FinancialLeverage.OneYear,
+                      'roe': x.OperationRatios.ROE.OneYear,
                       'return': x.ValuationRatios.PriceChange1M}]
         data = pd.DataFrame(rows).drop_duplicates(['time', 'symbol'])
         self.history = self.history.append(data.set_index(['time', 'symbol']))
-        if len(self.history) > self.history_maxlen:
-            self.history = self.history.tail(self.history_maxlen)
         return [x.Symbol for x in fine]
