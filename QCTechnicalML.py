@@ -3,7 +3,7 @@ Basic Machine Learning bot for Quantconnect
 
 @author: Francesco Baldisserri
 @email: fbaldisserri@gmail.com
-@version: 0.2
+@version: 0.3
 """
 
 import clr
@@ -30,8 +30,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
         self.short_pos = self.portfolio_stocks - self.long_pos
-        self.model = MLPRegressor(hidden_layer_sizes=(128,64), max_iter=1000,
-                                  early_stopping=True, tol=0, warm_start)
+        self.model = MLPRegressor(hidden_layer_sizes=(256, 16, 4), tol=0,
+                                  warm_start=True, early_stopping=True)
         self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
         self.UniverseSettings.Resolution = self.resolution
@@ -40,7 +40,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                          self.train_model)
         self.X, self.Y, self.X_val, self.Y_val = None, None, None, None
 
-    def train_model(self):
+    def train_model(self):  # TODO: Integrate Keras with validation early stop
         active_stocks = [s for s in list(self.ActiveSecurities.Keys)
                              if self.IsMarketOpen(s)]
         if len(active_stocks) >= self.portfolio_stocks:
@@ -59,7 +59,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
                                                  index=features.index)
                 self.trade(returns_predicted)
 
-    def add_data(self, X_old, Y_old, symbols, max_len=50000):
+    def add_data(self, X_old, Y_old, symbols, max_len=100000):  # TODO: Simplify add_data
         """ Accumulate datapoints for model training and test """
         X_new, Y_new = self.get_data(symbols=symbols,
                                      features=self.lookback,
@@ -79,7 +79,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         """ Rank returns and select the top for long and bottom for short """
         to_long = self.rank_stocks(returns, long=True).head(self.long_pos).index
         to_short = self.rank_stocks(returns, long=False).head(self.short_pos).index
-        invested = [str(s.ID) for s in self.Securities.Keys if self.Portfolio[s].Invested]
+        invested = [str(s.ID) for s in self.Securities.Keys
+                    if self.Portfolio[s].Invested]
         to_sell = set(invested) - set(to_long) - set(to_short)
         for symbol in to_sell:
             self.Liquidate(symbol)
@@ -90,21 +91,8 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.Log(f'Buy stocks: {to_long}\nSell stocks: {to_short}')
         self.Log(f'Portfolio changes: {len(to_sell)}/{len(invested)}')
 
-    def rank_stocks(self, pred_returns, long=True, commissions_pct=0.01):
-        """
-        Calculate best stocks to long or short from predicted returns
-        and accounting for commissions and current portfolio positions
-        """
-        friction = (-1 if long else +1) * commissions_pct
-        ranking = {}
-        for symbol, row in pred_returns.iterrows():
-            exp_return = row[0] * max(0, self.score)  # Normalizing return by model score when positive
-            position = self.Portfolio[symbol]
-            if (long and position.IsLong) or (not long and position.IsShort):  # Symbol already in the position desired
-                ranking[symbol] = exp_return  # No commissions
-            elif (not long and position.IsLong) or (long and position.IsShort):  # Symbol in the opposite position
-                ranking[symbol] = exp_return + 2 * friction  # Twice the commissions
-            else:  # Symbol not in the portfolio
-                ranking[symbol] = exp_return + friction  # One commission cost applied
+    def rank_stocks(self, pred_returns, long=True):
+        """ Calculate best stocks to long or short from predicted returns """
+        ranking = {symbol: row[0] for symbol, row in pred_returns.iterrows()}
         ranking = pd.DataFrame.from_dict(ranking, orient='index', columns=['return'])
         return ranking.sort_values('return', ascending=not long)
