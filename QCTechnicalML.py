@@ -1,8 +1,5 @@
 """
 Basic Machine Learning bot for Quantconnect
-
-@author: Francesco Baldisserri
-@email: fbaldisserri@gmail.com
 @version: 0.3
 """
 
@@ -15,65 +12,84 @@ from System import *
 from QuantConnect import *
 from QuantConnect.Algorithm import *
 
-import numpy as np
 import pandas as pd
-from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor
 
 
 class NeuralNetworkAlgorithm(QCAlgorithm):
     def Initialize(self):
         self.SetStartDate(2018, 7, 1)
-        self.SetEndDate(2019, 6, 30)
-        self.lookback = 252
+        self.SetCash(1000000)
+        self.SetBrokerageModel(BrokerageName.AlphaStreams)
+        self.lookback = 61
         self.portfolio_stocks = 20
         self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
         self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
         self.short_pos = self.portfolio_stocks - self.long_pos
-        self.model = MLPRegressor(hidden_layer_sizes=(256, 16, 4), tol=0,
-                                  warm_start=True, early_stopping=True)
+        self.model = GradientBoostingRegressor()
+        self.score = 0
         self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
         self.UniverseSettings.Resolution = self.resolution
+        self.Train(self.DateRules.EveryDay(),
+                   self.TimeRules.At(6, 0),
+                   self.train_model)
         self.Schedule.On(self.DateRules.EveryDay(),
                          self.TimeRules.At(10, 0, 0),
-                         self.train_model)
-        self.X, self.Y, self.X_val, self.Y_val = None, None, None, None
+                         self.trade_stocks)
+        self.X, self.Y = pd.DataFrame(), pd.DataFrame()
 
-    def train_model(self):  # TODO: Integrate Keras with validation early stop
-        active_stocks = [s for s in list(self.ActiveSecurities.Keys)
-                             if self.IsMarketOpen(s)]
-        if len(active_stocks) >= self.portfolio_stocks:
-            train_stocks, val_stocks = train_test_split(active_stocks)
-            self.X, self.Y = self.add_data(self.X, self.Y, train_stocks)
-            self.model.fit(self.X, self.Y)
-            self.X_val, self.Y_val = self.add_data(self.X_val, self.Y_val, val_stocks)
-            self.score = self.model.score(self.X_val, self.Y_val)
-            self.Debug(f'Time: {self.Time}\tPoints: {len(self.X)}\t'
-                       f'Epochs: {self.model.n_iter_}\tScore: {self.score:.4f}')
-            if self.score > 0:  # If model better than random then trade
-                features, _ = self.get_data(symbols=active_stocks,
-                                            features=self.lookback,
-                                            targets=0)
-                returns_predicted = pd.DataFrame(self.model.predict(features),
-                                                 index=features.index)
-                self.trade(returns_predicted)
+    def train_model(self):
+        self.add_data(list(self.ActiveSecurities.Keys))
+        X_train, X_test, Y_train, Y_test = self.split_data(self.X, self.Y)
+        self.model.fit(X_train, Y_train)
+        if len(X_test) > 0:
+            self.score = self.model.score(X_test, Y_test)
+            self.Plot("Model", "Score", float(self.score))
+            self.Debug(f'{self.Time}\tPoints: {len(X_train)}\t'
+                       f'Score: {self.score:.4f}')
 
-    def add_data(self, X_old, Y_old, symbols, max_len=100000):  # TODO: Simplify add_data
+    def trade_stocks(self):
+        stocks = [s for s in self.ActiveSecurities.Keys
+                         if self.IsMarketOpen(s)]
+        if len(stocks) >= self.portfolio_stocks and self.score > 0:  # If model better than random then trade
+            features, _ = self.get_data(symbols=stocks,
+                                        n_features=self.lookback,
+                                        n_targets=0)
+            returns_pred = pd.DataFrame(self.model.predict(features),
+                                        index=features.index.get_level_values('symbol'))
+            self.trade(returns_pred)
+
+    def add_data(self, symbols, max_len=100000):  # TODO: Simplify add_data
         """ Accumulate datapoints for model training and test """
         X_new, Y_new = self.get_data(symbols=symbols,
-                                     features=self.lookback,
-                                     targets=1)
-        X = X_new if X_old is None else np.vstack((X_old, X_new))
-        Y = Y_new if Y_old is None else np.vstack((Y_old, Y_new))
-        return (X[-max_len:], Y[-max_len:]) if len(X) > max_len else (X, Y)
+                                     n_features=self.lookback,
+                                     n_targets=1)
+        self.X, self.Y = self.X.append(X_new), self.Y.append(Y_new)
+        if len(self.X) > max_len:
+            self.X, self.Y = self.X.tail(max_len), self.Y.tail(max_len)
 
-    def get_data(self, symbols, features, targets):
+    def get_data(self, symbols, n_features, n_targets):
         """ Extract datapoints for model training and prediction """
-        history = self.History(symbols, targets + features + 1, self.resolution)
-        close = history['close'].unstack(-1)
-        returns = (close / close.shift(1, axis=1) - 1).iloc[:, 1:].fillna(0)
-        return returns.iloc[:, :features], returns.iloc[:, features:]  # Return X, Y
+        history = self.History(symbols, n_features+n_targets+1, self.resolution)
+        close = history['close'].unstack("time")
+        data = (close / close.shift(1, axis=1) - 1).iloc[:, 1:].fillna(0)
+        data["time"] = self.Time
+        data.set_index(["time"], append=True, inplace=True)
+        features = [f"feat_{i}" for i in range(n_features)]
+        targets = [f"tgt_{i}" for i in range(n_targets)]
+        data.set_axis(features+targets, axis=1, inplace=True)
+        return data.iloc[:, :n_features], data.iloc[:, n_features:]
+
+    def split_data(self, X, Y, test_split=0.2):
+        """ Split the time series in train and test data"""
+        time_ix = X.index.get_level_values("time")
+        time = time_ix.unique().sort_values()
+        train_len = len(time) - int(len(time) * test_split)
+        train_ix, test_ix = time[:train_len], time[train_len:]
+        X_train, Y_train = X[time_ix.isin(train_ix)], Y[time_ix.isin(train_ix)]
+        X_test, Y_test = X[time_ix.isin(test_ix)], Y[time_ix.isin(test_ix)]
+        return X_train, X_test, Y_train, Y_test
 
     def trade(self, returns):
         """ Rank returns and select the top for long and bottom for short """
