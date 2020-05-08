@@ -1,5 +1,5 @@
 """
-Basic Machine Learning bot for Quantconnect
+Basic Machine Learning Technical bot for Quantconnect
 @version: 0.3
 """
 
@@ -21,78 +21,72 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         self.SetStartDate(2018, 7, 1)
         self.SetCash(1000000)
         self.SetBrokerageModel(BrokerageName.AlphaStreams)
-        self.lookback = 61
-        self.portfolio_stocks = 20
-        self.long_short_ratio = 0.5  # 1.0 Long only <-> 0.0 Short only
-        self.long_pos = int(self.portfolio_stocks * self.long_short_ratio)
-        self.short_pos = self.portfolio_stocks - self.long_pos
+        self.lookback = 252
+        self.long_pos, self.short_pos = 10, 10
+        self.pos_size = 1.0 / (self.long_pos + self.short_pos)
         self.model = GradientBoostingRegressor()
         self.score = 0
-        self.resolution = Resolution.Daily
         self.AddUniverse(self.Universe.Index.QC500)
-        self.UniverseSettings.Resolution = self.resolution
+        self.UniverseSettings.Resolution = Resolution.Daily
         self.Train(self.DateRules.EveryDay(),
                    self.TimeRules.At(6, 0),
                    self.train_model)
         self.Schedule.On(self.DateRules.EveryDay(),
                          self.TimeRules.At(10, 0, 0),
-                         self.trade_stocks)
+                         self.predict_prices)
         self.X, self.Y = pd.DataFrame(), pd.DataFrame()
 
     def train_model(self):
+        """ Train model with new data and uses the last 20% for scoring """
         self.add_data(list(self.ActiveSecurities.Keys))
-        X_train, X_test, Y_train, Y_test = self.split_data(self.X, self.Y)
-        self.model.fit(X_train, Y_train)
-        if len(X_test) > 0:
-            self.score = self.model.score(X_test, Y_test)
-            self.Plot("Model", "Score", float(self.score))
-            self.Debug(f'{self.Time}\tPoints: {len(X_train)}\t'
-                       f'Score: {self.score:.4f}')
+        train_len = int(len(self.X) * 0.8)
+        self.model.fit(self.X.iloc[:train_len], self.Y.iloc[:train_len])
+        self.score = self.model.score(self.X.iloc[train_len:],
+                                      self.Y.iloc[train_len:])
+        self.Plot("Model", "Score", float(self.score))
+        self.Debug(f'{self.Time}\tPoints:{train_len}\tScore:{self.score:.4f}')
 
-    def trade_stocks(self):
-        stocks = [s for s in self.ActiveSecurities.Keys
-                         if self.IsMarketOpen(s)]
-        if len(stocks) >= self.portfolio_stocks and self.score > 0:  # If model better than random then trade
+    def predict_prices(self):
+        """ If model score is better than random predicts prices and trade """
+        stocks = [s for s in self.ActiveSecurities.Keys if self.IsMarketOpen(s)]
+        if len(stocks) >= (self.long_pos + self.short_pos) and self.score > 0:
+            # Enough stocks are tradeable and model score better than 0
             features, _ = self.get_data(symbols=stocks,
                                         n_features=self.lookback,
                                         n_targets=0)
             returns_pred = pd.DataFrame(self.model.predict(features),
                                         index=features.index.get_level_values('symbol'))
-            self.trade(returns_pred)
+            self.trade_stocks(returns_pred)
 
-    def add_data(self, symbols, max_len=100000):  # TODO: Simplify add_data
+    def add_data(self, symbols, max_len=10000):
         """ Accumulate datapoints for model training and test """
         X_new, Y_new = self.get_data(symbols=symbols,
                                      n_features=self.lookback,
                                      n_targets=1)
         self.X, self.Y = self.X.append(X_new), self.Y.append(Y_new)
-        if len(self.X) > max_len:
+        if len(self.X) > max_len: # Limit the dataset length to a maximum
             self.X, self.Y = self.X.tail(max_len), self.Y.tail(max_len)
 
     def get_data(self, symbols, n_features, n_targets):
-        """ Extract datapoints for model training and prediction """
-        history = self.History(symbols, n_features+n_targets+1, self.resolution)
+        """
+        Extract features and targets for model training and prediction
+        for the last (n_features + n_targets) periods
+        """
+        history = self.History(symbols, n_features + n_targets + 1,
+                               self.UniverseSettings.Resolution)
         close = history['close'].unstack("time")
-        data = (close / close.shift(1, axis=1) - 1).iloc[:, 1:].fillna(0)
-        data["time"] = self.Time
-        data.set_index(["time"], append=True, inplace=True)
-        features = [f"feat_{i}" for i in range(n_features)]
-        targets = [f"tgt_{i}" for i in range(n_targets)]
-        data.set_axis(features+targets, axis=1, inplace=True)
-        return data.iloc[:, :n_features], data.iloc[:, n_features:]
+        price_changes = (close / close.shift(1, axis=1) - 1).iloc[:, 1:].fillna(0)
+        price_changes["time"] = self.Time
+        price_changes.set_index(["time"], append=True, inplace=True)
 
-    def split_data(self, X, Y, test_split=0.2):
-        """ Split the time series in train and test data"""
-        time_ix = X.index.get_level_values("time")
-        time = time_ix.unique().sort_values()
-        train_len = len(time) - int(len(time) * test_split)
-        train_ix, test_ix = time[:train_len], time[train_len:]
-        X_train, Y_train = X[time_ix.isin(train_ix)], Y[time_ix.isin(train_ix)]
-        X_test, Y_test = X[time_ix.isin(test_ix)], Y[time_ix.isin(test_ix)]
-        return X_train, X_test, Y_train, Y_test
+        feature_names = [f"feat_{i}" for i in range(n_features)]
+        target_names = [f"tgt_{i}" for i in range(n_targets)]
+        price_changes.set_axis(feature_names + target_names, axis=1, inplace=True)
+        # Return features and targets
+        return price_changes.iloc[:, :n_features], price_changes.iloc[:, n_features:]
 
-    def trade(self, returns):
-        """ Rank returns and select the top for long and bottom for short """
+    def trade_stocks(self, returns):
+        """ Rank returns and select the top for longing and bottom for shorting """
         to_long = self.rank_stocks(returns, long=True).head(self.long_pos).index
         to_short = self.rank_stocks(returns, long=False).head(self.short_pos).index
         invested = [str(s.ID) for s in self.Securities.Keys
@@ -101,9 +95,9 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
         for symbol in to_sell:
             self.Liquidate(symbol)
         for symbol in to_long:
-            self.SetHoldings(symbol, self.long_short_ratio / self.long_pos)
+            self.SetHoldings(symbol, self.long_pos * self.pos_size)
         for symbol in to_short:
-            self.SetHoldings(symbol, -(1 - self.long_short_ratio) / self.short_pos)
+            self.SetHoldings(symbol, -self.short_pos * self.pos_size)
         self.Log(f'Buy stocks: {to_long}\nSell stocks: {to_short}')
         self.Log(f'Portfolio changes: {len(to_sell)}/{len(invested)}')
 

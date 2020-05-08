@@ -1,6 +1,0 @@
-backtest
-    - Training Score >0 from the beginning and increasing
-    - Check commissions value
-    - Sharpe ratio > ?
-    - 10% of stock universe at the start date (no survivorship bias)
-    -
