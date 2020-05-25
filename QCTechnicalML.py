@@ -39,7 +39,7 @@ class NeuralNetworkAlgorithm(QCAlgorithm):
     def train_model(self):
         """ Train model with new data and uses the last 20% for scoring """
         self.add_data(list(self.ActiveSecurities.Keys))
-        train_len = int(len(self.X) * 0.8)
+        train_len = int(len(self.X) * 0.8)  # TODO: Revisit split strategy for time series
         self.model.fit(self.X.iloc[:train_len], self.Y.iloc[:train_len])
         self.score = self.model.score(self.X.iloc[train_len:],
                                       self.Y.iloc[train_len:])
